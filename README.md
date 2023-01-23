@@ -1,0 +1,2 @@
+# SpatialPatterns_SnowCover_FireSeverity
+SpatialPatterns_SnowCover_FireSeverity
