@@ -1,0 +1,249 @@
+---
+title: "Dataset Tidying and Preparation"
+author: "Jack Goldman"
+date: "2023-01-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Load required packages
+
+```{r}
+library(tidyverse)
+library(sf)
+library(raster)
+library(ggplot2)
+library(tmap)
+library(exactextractr)
+library(kableExtra)
+```
+
+### read in data
+
+```{r}
+#snow disappearance date
+sdd_path <- "C:/Users/jandr/Documents/PhD/Thesis/Data/SDD/"
+sdd_list <- list.files(sdd_path, pattern = glob2rx("*Shield.tif"))
+
+#snow cover frequency
+scf_path <- "C:/Users/jandr/Documents/PhD/Thesis/Data/SCF/"
+scf_list <- list.files(scf_path, pattern = glob2rx("*Shield.tif"))
+
+# Ontario Secondary Watersheds
+ws = st_read("C:/Users/jandr/Documents/PhD/Thesis/Data/Watersheds/ONT_WSHED_BDRY_SEC_DERIVED.shp")
+
+#Ontario Shield
+shield = st_read("C:/Users/jandr/Documents/PhD/Thesis/OntBSdb/Watersheds_Ecoregion/Ontario_Shield_v0.shp")
+```
+
+### Visualize watersheds
+
+```{r, viz watersheds, cache = TRUE}
+tm_shape(ws) +
+  tm_fill() +
+  tm_borders() 
+
+```
+
+### Clip watersheds to the ontario shield ecoregion
+
+```{r, clip watersheds to shield, cache = TRUE}
+# transform crs between both objects to match
+ws_crs = st_crs(ws) # EPSG 4269
+shield_crs = st_crs(shield) # EPSG 4326
+#transform to 4326 -- WGS 84
+ws = ws %>%  st_transform(shield_crs)
+#check transformation to confirm matching
+st_crs(ws) == st_crs(shield)
+
+#crop watershed by shield geometry
+ws_shield  = st_intersection(ws, shield)
+
+#lets map new ws to check 
+wss = tm_shape(ws_shield) +
+      tm_fill() +
+      tm_borders() 
+wss
+```
+
+## Now lets plot read snow disappearance date in 2001
+
+There are a few steps we have to take. Step 1: read in raster and crop to area of interest
+
+```{r, cache = TRUE}
+#read in raster -- select first raster in list which is 2001
+sdd2001 = raster::raster(paste0(sdd_path, sdd_list[1]))
+
+#lets crop sdd2001 to shield -- first check crs
+st_crs(sdd2001) == st_crs(shield) # all good
+
+#crop
+sdd2001 = crop(sdd2001, shield)
+sdd2001 = raster::mask(sdd2001, shield)
+
+```
+
+Step 2: Lets look at the distribution of values in the rasters This will help us set a palette to better visualize the raster later on
+
+```{r, cache = TRUE}
+sdd2001 %>% as.data.frame() %>% 
+  ggplot(aes(x = SDD))+
+  geom_density(alpha = 0.3)
+
+# lets get a tibble of summary statistics
+
+sdd2001 %>% 
+  as.data.frame() %>% 
+  filter (SDD > 0) %>% # we not want 0 which is permanent or waterbody
+  summarise(mean = mean(SDD),
+            max = max(SDD),
+            min = min(SDD),
+            q25 = quantile(SDD, 0.25),
+            q75 = quantile(SDD, 0.75))
+```
+
+Step 3: Visualize the raster using custom breaks
+
+```{r, cache = TRUE}
+#lets set custom breaks based on summary values
+breaks_01 = c(0, 94, 214, 220, 245, 265,  297)
+
+# plot
+wss1 = wss + 
+  tm_shape(sdd2001) +
+  tm_raster(alpha = 0.7, palette = "Blues", breaks = breaks_01)
+
+wss1
+```
+
+### now lets calculate the average for each watershed
+
+```{r, results= FALSE, cache = TRUE}
+
+ws_shield = 
+  ws_shield %>% mutate(
+    sddMean_01 = exact_extract(sdd2001, ws_shield, 'mean'),
+    sddMax_01 = exact_extract(sdd2001, ws_shield, 'max')
+  )
+
+```
+
+Lets View it in a table
+```{r}
+ws_shield %>% 
+  st_set_geometry(NULL) %>%
+  knitr::kable() %>% 
+  kable_styling(font_size = 8)
+```
+
+
+
+Lets plot it
+
+```{r, cache = TRUE}
+wss_sddmean_01 = 
+  tm_shape(ws_shield) +
+  tm_polygons(col = 'sddMean_01', palette = "Blues" )
+
+wss_sddmean_01
+```
+### lets bring in fires and plot the fire locations for the year 2001
+
+```{r}
+fires = st_read("C:/Users/jandr/Documents/PhD/Thesis/OntBSdb/On_Fire_Perimeters01to2020.shp")
+```
+
+Get 2001 fire perimeters and calculate centroids
+```{r, cache=TRUE}
+fires_01 = fires %>% 
+  filter(Fire_Year == 2001) %>% 
+  st_centroid()
+
+```
+Plot them
+```{r, plot fire points, cache = TRUE}
+wss_sddmean_01_fp = 
+  wss_sddmean_01 + 
+  tm_shape(fires_01) +
+  tm_dots(size = 0.1, col = "red" , shape = 4)
+
+wss_sddmean_01_fp
+```
+
+
+plot by size
+```{r}
+wss_sddmean_01_fs = 
+  wss_sddmean_01 + 
+  tm_shape(fires_01) +
+  tm_symbols(col = "FIRE_FINAL", size = 0.1)
+
+wss_sddmean_01_fs
+```
+
+
+Get area burned per watershed
+```{r}
+
+ws_shield_f = st_join(fires_01, ws_shield)
+
+ws_shield_f = 
+  ws_shield_f %>% 
+  group_by(NAME) %>% 
+  summarise(area_burned = sum(FIRE_FINAL)) %>% 
+  st_drop_geometry()
+
+ws_shield = 
+  ws_shield %>% 
+  left_join(ws_shield_f, by = "NAME") %>% 
+  replace_na(list(area_burned = 0))
+
+```
+
+plot area burned
+```{r}
+wss_areaburned = 
+  tm_shape(ws_shield) +
+  tm_polygons(col = "area_burned", palette = "Reds" )
+
+wss_areaburned
+```
+
+Lets plot the two maps side by side
+```{r}
+tmap_arrange(wss_sddmean_01, wss_areaburned)
+
+```
+
+# lets look at defoliation
+
+```{r}
+defol_01 = st_read("C:/Users/jandr/Documents/PhD/Thesis/Data/Defoliation/SBW_ON_1984-2020_CR/2001_ON_2022_02_10_CR.shp")
+
+defol_01 %>%
+  st_set_geometry(NULL) %>% 
+  glimpse()
+```
+crop it to study area
+```{r}
+# check crs
+st_crs(defol_01) == st_crs(ws_shield)
+
+#clip
+
+defol_01 = 
+  defol_01 %>% 
+  st_intersection(ws_shield)
+```
+```{r}
+wss_defol = 
+  wss +
+  tm_shape(defol_01) +
+  tm_polygons(col = "DEFOL", palette = "Greens")
+wss_defol
+
+```
+
